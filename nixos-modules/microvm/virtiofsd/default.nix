@@ -26,6 +26,7 @@ in
               }
             );
             events = "PROCESS_STATE";
+            buffer_size = 100;
           };
         } // builtins.listToAttrs (
           map ({ tag, socket, source, readOnly, ... }: {
