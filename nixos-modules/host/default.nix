@@ -22,7 +22,12 @@ in
       }
     ]) (builtins.attrNames config.microvm.vms);
 
-    boot.kernelModules = [ "tun" ];
+    boot.kernelModules = [
+      # For `type = "tap"` interfaces
+      "tap"
+      # For `tap.vhost = true` interfaces
+      "vhost_net"
+    ];
 
     system.activationScripts.microvm-host = ''
       mkdir -p ${stateDir}
@@ -69,6 +74,7 @@ in
         before = [
           "microvm@${name}.service"
           "microvm-tap-interfaces@${name}.service"
+          "microvm-macvtap-interfaces@${name}.service"
           "microvm-pci-devices@${name}.service"
           "microvm-virtiofsd@${name}.service"
         ];

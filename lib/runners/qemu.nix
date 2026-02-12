@@ -19,35 +19,19 @@ let
     ]);
   });
 
-  minimizeQemuClosureSize = pkg: (pkg.override (oa: {
+  minimizeQemuClosureSize = pkg: pkg.override (oa: {
     # standin for disabling everything guilike by hand
     nixosTestRunner =
       if graphics.enable
       then oa.nixosTestRunner or false
       else true;
-    enableDocs = false;
-  })).overrideAttrs (oa: {
-    postFixup = ''
-      ${oa.postFixup or ""}
-      # This particular firmware causes 192mb of closure size
-      ${lib.optionalString (system != "aarch64-linux") "rm -rf $out/share/qemu/edk2-arm-*"}
-    '';
   });
 
   overrideQemu = x: lib.pipe x (
     lib.optional requireUsb enableLibusb
     ++ lib.optional microvmConfig.optimize.enable minimizeQemuClosureSize
   );
-  qemuPkg =
-    if microvmConfig.cpu == null && vmHostPackages.stdenv.hostPlatform.isLinux
-    then
-      # If no CPU is requested and the host is Linux, use qemu with KVM support (hardware-accelerated)
-      vmHostPackages.qemu_kvm
-    else
-      # Different CPU architectures like darwin or Non-Linux use the generic qemu package
-      vmHostPackages.qemu;
-
-  qemu = overrideQemu qemuPkg;
+  qemu = overrideQemu microvmConfig.qemu.package;
 
   aioEngine = if vmHostPackages.stdenv.hostPlatform.isLinux
     then "io_uring"
@@ -303,7 +287,7 @@ lib.warnIf (mem == 2048) ''
       forwardPorts != [] &&
       ! builtins.any ({ type, ... }: type == "user") interfaces
     ) "${hostName}: forwardPortsOptions only running with user network" (
-      builtins.concatMap ({ type, id, mac, bridge, ... }: [
+      builtins.concatMap ({ type, id, mac, bridge, tap ? {}, ... }: [
         "-netdev" (
           lib.concatStringsSep "," (
             [
@@ -319,6 +303,9 @@ lib.warnIf (mem == 2048) ''
             ++ lib.optionals (type == "tap") [
               "ifname=${id}"
               "script=no" "downscript=no"
+            ]
+            ++ lib.optionals (type == "tap" && tap.vhost or false) [
+              "vhost=on"
             ]
             ++ lib.optionals (type == "macvtap") [ (
               let

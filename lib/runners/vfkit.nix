@@ -1,6 +1,5 @@
 { pkgs
 , microvmConfig
-, macvtapFds
 , withDriveLetters
 , ...
 }:
@@ -10,11 +9,11 @@ let
   inherit (vmHostPackages.stdenv.hostPlatform) system;
   inherit (microvmConfig) vmHostPackages;
 
-  vfkit = vmHostPackages.vfkit;
+  vfkitPkg = microvmConfig.vfkit.package;
 
   inherit (microvmConfig)
-    hostName vcpu mem user interfaces volumes shares socket
-    storeOnDisk kernel initrdPath storeDisk kernelParams
+    vcpu mem user interfaces shares socket
+    storeOnDisk kernel initrdPath kernelParams
     balloon devices credentialFiles vsock graphics;
 
   inherit (microvmConfig.vfkit) extraArgs logLevel rosetta;
@@ -75,7 +74,7 @@ let
     );
 
   allArgsWithoutSocket = [
-    "${lib.getExe vfkit}"
+    "${lib.getExe vfkitPkg}"
     "--cpus" (toString vcpu)
     "--memory" (toString mem)
   ]

@@ -342,6 +342,19 @@ in
               MAC address of the guest's network interface
             '';
           };
+          tap.vhost = mkOption {
+            type = types.bool;
+            default = false;
+            description = ''
+              Enable vhost-net for TAP interfaces.
+
+              When enabled, packet processing is offloaded to the kernel's
+              vhost-net module instead of QEMU userspace, significantly
+              improving network throughput (~10 Gbps vs ~1.5 Gbps).
+
+              Requires the vhost_net kernel module on the host.
+            '';
+          };
         };
       });
     };
@@ -501,30 +514,30 @@ in
       '';
     };
 
-     graphics = {
-       enable = mkOption {
-         type = types.bool;
-         default = false;
-         description = ''
-           Enable GUI support.
+    graphics = {
+      enable = mkOption {
+        type = types.bool;
+        default = false;
+        description = ''
+          Enable GUI support.
 
-           MicroVMs with graphics are intended for the interactive
-           use-case. They cannot be started through systemd jobs.
+          MicroVMs with graphics are intended for the interactive
+          use-case. They cannot be started through systemd jobs.
 
-           The display backend is chosen by `microvm.graphics.backend`.
-         '';
-       };
+          The display backend is chosen by `microvm.graphics.backend`.
+        '';
+      };
 
-       backend = mkOption {
-         type = types.enum [ "gtk" "cocoa" ];
-         default = if pkgs.stdenv.hostPlatform.isDarwin then "cocoa" else "gtk";
-         defaultText = lib.literalExpression ''if pkgs.stdenv.hostPlatform.isDarwin then "cocoa" else "gtk"'';
-         description = ''
-           QEMU display backend to use when `graphics.enable` is true.
+      backend = mkOption {
+        type = types.enum [ "gtk" "cocoa" ];
+        default = if pkgs.stdenv.hostPlatform.isDarwin then "cocoa" else "gtk";
+        defaultText = lib.literalExpression ''if pkgs.stdenv.hostPlatform.isDarwin then "cocoa" else "gtk"'';
+        description = ''
+          QEMU display backend to use when `graphics.enable` is true.
 
-           Defaults to `cocoa` on Darwin hosts and `gtk` otherwise.
-         '';
-       };
+          Defaults to `cocoa` on Darwin hosts and `gtk` otherwise.
+        '';
+      };
 
       socket = mkOption {
         type = types.str;
@@ -538,7 +551,7 @@ in
     vmHostPackages = mkOption {
       description = "If set, overrides the default host package.";
       example = "nixpkgs.legacyPackages.aarch64-darwin.pkgs";
-      type = types.nullOr types.pkgs;
+      type = types.pkgs;
       default = if cfg.cpu == null then pkgs else pkgs.buildPackages;
       defaultText = lib.literalExpression "if config.microvm.cpu == null then pkgs else pkgs.buildPackages";
     };
@@ -633,6 +646,32 @@ in
       });
     };
 
+    qemu.package = mkOption {
+      description = "The QEMU package to use.";
+      type = types.package;
+      default = if cfg.cpu == null && cfg.vmHostPackages.stdenv.hostPlatform.isLinux then
+        # If no CPU is requested and the host is Linux, use qemu with KVM support (hardware-accelerated)
+        cfg.vmHostPackages.qemu_kvm
+      else
+        # Different CPU architectures like darwin or Non-Linux use the generic qemu package
+        cfg.vmHostPackages.qemu;
+      defaultText = lib.literalExpression ''
+        if config.microvm.cpu == null && config.microvm.vmHostPackages.stdenv.hostPlatform.isLinux then
+          # If no CPU is requested and the host is Linux, use qemu with KVM support (hardware-accelerated)
+          config.microvm.vmHostPackages.qemu_kvm
+        else
+          # Different CPU architectures like darwin or Non-Linux use the generic qemu package
+          config.microvm.vmHostPackages.qemu
+      '';
+    };
+
+    alioth.package = mkOption {
+      description = "The alioth package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.alioth;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.alioth";
+    };
+
     cloud-hypervisor.platformOEMStrings = mkOption {
       type = with types; listOf str;
       default = [];
@@ -656,6 +695,21 @@ in
       description = "Extra arguments to pass to cloud-hypervisor.";
     };
 
+    cloud-hypervisor.package = mkOption {
+      description = "The cloud-hypervisor package to use.";
+      type = types.package;
+      default = if cfg.graphics.enable then
+        cfg.vmHostPackages.cloud-hypervisor-graphics
+      else
+        cfg.vmHostPackages.cloud-hypervisor;
+      defaultText = lib.literalExpression ''
+        if config.microvm.graphics.enable then
+          config.microvm.vmHostPackages.cloud-hypervisor-graphics
+        else
+          config.microvm.vmHostPackages.cloud-hypervisor
+      '';
+    };
+
     crosvm.extraArgs = mkOption {
       type = with types; listOf str;
       default = [];
@@ -666,6 +720,13 @@ in
       type = with types; nullOr str;
       default = null;
       description = "A Hypervisor's sandbox directory";
+    };
+
+    crosvm.package = mkOption {
+      description = "The crosvm package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.crosvm;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.crosvm";
     };
 
     firecracker.cpu = mkOption {
@@ -711,6 +772,27 @@ in
       description = "Extra config to merge into Firecracker JSON configuration";
     };
 
+    firecracker.package = mkOption {
+      description = "The firecracker package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.firecracker;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.firecracker";
+    };
+
+    kvmtool.package = mkOption {
+      description = "The kvmtool package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.kvmtool;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.kvmtool";
+    };
+
+    stratovirt.package = mkOption {
+      description = "The stratovirt package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.stratovirt;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.stratovirt";
+    };
+
     vfkit.extraArgs = mkOption {
       type = with types; listOf str;
       default = [];
@@ -721,6 +803,13 @@ in
       type = with types; nullOr (enum ["debug" "info" "error"]);
       default = "info";
       description = "vfkit log level.";
+    };
+
+    vfkit.package = mkOption {
+      description = "The vfkit package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.vfkit;
+      defaultText = lib.literalExpression "config.microvm.vmHostPackages.vfkit";
     };
 
     vfkit.rosetta = {
@@ -802,6 +891,13 @@ in
       description = ''
         Extra command-line switch to pass to virtiofsd.
       '';
+    };
+
+    virtiofsd.package = mkOption {
+      description = "The virtiofsd package to use.";
+      type = types.package;
+      default = cfg.vmHostPackages.virtiofsd;
+      defaultText = literalExpression ''config.microvm.vmHostPackages.virtiofsd'';
     };
 
     runner = mkOption {
