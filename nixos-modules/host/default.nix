@@ -1,8 +1,13 @@
-{ pkgs, config, lib, ... }:
+{
+  pkgs,
+  config,
+  lib,
+  ...
+}:
 let
   inherit (config.microvm) stateDir;
-  microvmCommand = import ../../pkgs/microvm-command.nix {
-    inherit pkgs;
+  microvmCommand = pkgs.callPackage ../../pkgs/microvm-command.nix {
+    inherit stateDir;
   };
   user = "microvm";
   group = "kvm";
@@ -29,11 +34,11 @@ in
       "vhost_net"
     ];
 
-    system.activationScripts.microvm-host = ''
-      mkdir -p ${stateDir}
-      chown ${user}:${group} ${stateDir}
-      chmod u+rwx,g+w ${stateDir}
-    '';
+    systemd.tmpfiles.settings."10-microvm"."${stateDir}".d = {
+      user = user;
+      group = group;
+      mode = "0775";
+    };
 
     environment.systemPackages = [
       microvmCommand
@@ -77,6 +82,7 @@ in
           "microvm-macvtap-interfaces@${name}.service"
           "microvm-pci-devices@${name}.service"
           "microvm-virtiofsd@${name}.service"
+          "microvm-set-booted@${name}.service"
         ];
         partOf = [ "microvm@${name}.service" ];
         wantedBy = [ "microvms.target" ];
@@ -119,6 +125,13 @@ in
           if guestConfig.microvm.declaredRunner.supportsNotifySocket
           then "notify"
           else "simple";
+        # Register with systemd-machined if the VM opts in
+        wants = lib.optionals runner.registerWithMachined [
+          "systemd-machined.service"
+        ];
+        after = lib.optionals runner.registerWithMachined [
+          "systemd-machined.service"
+        ];
       };
       "microvm-tap-interfaces@${name}" = {
         serviceConfig.X-RestartIfChanged = [ "" microvmConfig.restartIfChanged ];
@@ -140,7 +153,7 @@ in
         description = "Setup MicroVM '%i' TAP interfaces";
         before = [ "microvm@%i.service" ];
         partOf = [ "microvm@%i.service" ];
-        after = [ "network.target" ];
+        after = [ "network.target" "microvm-set-booted@%i.service" ];
         unitConfig.ConditionPathExists = "${stateDir}/%i/current/bin/tap-up";
         restartIfChanged = false;
         serviceConfig = {
@@ -155,6 +168,7 @@ in
       "microvm-macvtap-interfaces@" = {
         description = "Setup MicroVM '%i' MACVTAP interfaces";
         before = [ "microvm@%i.service" ];
+        after = [ "microvm-set-booted@%i.service" ];
         partOf = [ "microvm@%i.service" ];
         unitConfig.ConditionPathExists = "${stateDir}/%i/current/bin/macvtap-up";
         restartIfChanged = false;
@@ -182,31 +196,16 @@ in
         };
       };
 
-      "microvm-virtiofsd@" =
-        let
-          runFromBootedOrCurrent = pkgs.writeShellScript "microvm-runFromBootedOrCurrent" ''
-            NAME="$1"
-            VM="$2"
-            cd "${stateDir}/$VM"
-
-            if [ -e booted ]; then
-              exec booted/bin/$NAME
-            else
-              exec current/bin/$NAME
-            fi
-          '';
-
-        in {
+      "microvm-virtiofsd@" = {
           description = "VirtioFS daemons for MicroVM '%i'";
           before = [ "microvm@%i.service" ];
-          after = [ "local-fs.target" ];
+          after = [ "local-fs.target" "microvm-set-booted@%i.service" ];
           partOf = [ "microvm@%i.service" ];
           unitConfig.ConditionPathExists = "${stateDir}/%i/current/bin/virtiofsd-run";
           restartIfChanged = false;
           serviceConfig = {
             WorkingDirectory = "${stateDir}/%i";
             ExecStart = "${stateDir}/%i/current/bin/virtiofsd-run";
-            ExecStop = "${runFromBootedOrCurrent} virtiofsd-shutdown %i";
             LimitNOFILE = 1048576;
             NotifyAccess = "all";
             PrivateTmp = "yes";
@@ -214,8 +213,29 @@ in
             RestartSec = "5s";
             SyslogIdentifier = "microvm-virtiofsd@%i";
             Type = "notify";
+            KillMode = "mixed";
           };
         };
+
+      "microvm-set-booted@" = {
+        description = "Save MicroVM '%i' booted configuration";
+        before = [ "microvm@%i.service" ];
+        partOf = [ "microvm@%i.service" ];
+        restartIfChanged = false;
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          SyslogIdentifier = "microvm-set-booted@%i";
+          WorkingDirectory = "${stateDir}/%i";
+          User = user;
+          Group = group;
+          ExecStop = "${lib.getExe' pkgs.coreutils "rm"} booted";
+        };
+        script = ''
+          rm -f booted
+          ln -s $(readlink current) booted
+        '';
+      };
 
       "microvm@" = {
         description = "MicroVM '%i'";
@@ -224,23 +244,19 @@ in
           "microvm-macvtap-interfaces@%i.service"
           "microvm-pci-devices@%i.service"
           "microvm-virtiofsd@%i.service"
+          "microvm-set-booted@%i.service"
         ];
         after = [
           "network.target"
+          "systemd-modules-load.service"
           "microvm-tap-interfaces@%i.service"
           "microvm-macvtap-interfaces@%i.service"
           "microvm-pci-devices@%i.service"
           "microvm-virtiofsd@%i.service"
+          "microvm-set-booted@%i.service"
         ];
         unitConfig.ConditionPathExists = "${stateDir}/%i/current/bin/microvm-run";
         restartIfChanged = false;
-        preStart = ''
-          rm -f booted
-          ln -s $(readlink current) booted
-        '';
-        postStop = ''
-          rm booted
-        '';
         serviceConfig = {
           Type =
             if config.microvm.host.useNotifySockets
@@ -249,6 +265,12 @@ in
           WorkingDirectory = "${stateDir}/%i";
           ExecStart = "${stateDir}/%i/current/bin/microvm-run";
           ExecStop = "${stateDir}/%i/booted/bin/microvm-shutdown";
+          ExecStartPost = [
+            "+${pkgs.runtimeShell} -c 'if [ -x ${stateDir}/%i/current/bin/microvm-register ]; then ${stateDir}/%i/current/bin/microvm-register $MAINPID; fi'"
+          ];
+          ExecStopPost = [
+            "+${pkgs.runtimeShell} -c 'if [ -x ${stateDir}/%i/current/bin/microvm-unregister ]; then ${stateDir}/%i/current/bin/microvm-unregister; fi'"
+          ];
           TimeoutSec = config.microvm.host.startupTimeout;
           Restart = "always";
           RestartSec = "5s";
